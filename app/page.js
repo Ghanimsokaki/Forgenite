@@ -1,9 +1,19 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import AgentRun from "@/components/AgentRun";
+import FileViewer from "@/components/FileViewer";
 import Markdown from "@/components/Markdown";
 import ModelPicker from "@/components/ModelPicker";
 import SettingsModal from "@/components/Settings";
+import {
+  AGENT_PROMPT,
+  AGENT_TOOLS,
+  callChat,
+  executeTool,
+  extractJson,
+  sanitizePath,
+} from "@/lib/agent";
 import { CURATED_MODELS, DEFAULT_MODEL, shortName } from "@/lib/models";
 
 const LS_CHATS = "forgenite.chats.v1";
@@ -16,6 +26,8 @@ const DEFAULT_SETTINGS = {
   temperature: 0.7,
   maxTokens: 1024,
   model: DEFAULT_MODEL,
+  mode: "chat",
+  agentMaxSteps: 8,
 };
 
 const GITHUB_URL = "https://github.com/Ghanimsokaki/Forgenite";
@@ -44,11 +56,62 @@ function newChat(model) {
   };
 }
 
-const SUGGESTIONS = [
+function contextFrom(msgs) {
+  const parts = [];
+  for (const m of msgs.slice(-6)) {
+    if (m.role === "user" && m.content) parts.push(`user: ${String(m.content).slice(0, 300)}`);
+    else if (m.role === "assistant" && m.content)
+      parts.push(`assistant: ${String(m.content).slice(0, 300)}`);
+    else if (m.role === "agent" && m.final)
+      parts.push(`assistant: ${String(m.final).slice(0, 300)}`);
+  }
+  return parts.join("\n");
+}
+
+/** Map mixed chat history (incl. agent runs) to valid chat-completion messages. */
+function toChatMessages(msgs) {
+  return msgs
+    .filter((m) => m.role === "user" || m.role === "assistant" || m.role === "agent")
+    .map((m) =>
+      m.role === "agent"
+        ? {
+            role: "assistant",
+            content:
+              m.final ||
+              `*(agent run: ${m.steps?.length || 0} steps, ${m.files?.length || 0} files created)*`,
+          }
+        : { role: m.role, content: m.content }
+    );
+}
+
+const CHAT_SUGGESTIONS = [
   { icon: "🧠", title: "Explain like I'm five", text: "Explain how large language models work, like I'm five." },
   { icon: "💻", title: "Write some code", text: "Write a Python script that renames all files in a folder to kebab-case." },
   { icon: "🚀", title: "Plan something", text: "Help me plan a 3-day weekend trip to Tokyo on a budget." },
   { icon: "🔧", title: "Debug my problem", text: "My React app re-renders too often. How do I diagnose and fix it?" },
+];
+
+const AGENT_SUGGESTIONS = [
+  {
+    icon: "🌐",
+    title: "Build a website",
+    text: "Build me a modern one-page portfolio website with a dark theme. Create the complete HTML and CSS files.",
+  },
+  {
+    icon: "🐍",
+    title: "Make a script",
+    text: "Make a Python script that renames all files in a folder to kebab-case, with a dry-run mode.",
+  },
+  {
+    icon: "🔍",
+    title: "Research & report",
+    text: "Research the latest developments around NVIDIA NIM and write me a short briefing with sources.",
+  },
+  {
+    icon: "🏦",
+    title: "Crunch numbers",
+    text: "Calculate the monthly payment and total interest for a $350,000 mortgage at 6.2% APR over 30 years, then summarize the first year of the amortization.",
+  },
 ];
 
 export default function Home() {
@@ -67,11 +130,14 @@ export default function Home() {
   const [settingsOpen, setSettingsOpen] = useState(false);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [copiedId, setCopiedId] = useState(null);
+  const [viewFile, setViewFile] = useState(null);
 
   const abortRef = useRef(null);
   const scrollRef = useRef(null);
   const taRef = useRef(null);
   const stickToBottom = useRef(true);
+
+  const mode = settings.mode === "agent" ? "agent" : "chat";
 
   const activeChat = useMemo(
     () => chats.find((c) => c.id === activeId) || null,
@@ -107,7 +173,34 @@ export default function Home() {
   }, []);
 
   useEffect(() => {
-    if (ready) localStorage.setItem(LS_CHATS, JSON.stringify(chats.slice(0, 60)));
+    if (!ready) return;
+    try {
+      localStorage.setItem(LS_CHATS, JSON.stringify(chats.slice(0, 60)));
+    } catch {
+      // Storage quota exceeded (agent files can be large) — trim file contents.
+      try {
+        const trimmed = chats.slice(0, 20).map((c) => ({
+          ...c,
+          messages: c.messages.map((m) =>
+            m.role === "agent" && Array.isArray(m.files) && m.files.length
+              ? {
+                  ...m,
+                  files: m.files.map((f) => ({
+                    ...f,
+                    content:
+                      f.content.length > 4000
+                        ? f.content.slice(0, 4000) + "\n… (truncated to save space)"
+                        : f.content,
+                  })),
+                }
+              : m
+          ),
+        }));
+        localStorage.setItem(LS_CHATS, JSON.stringify(trimmed));
+      } catch {
+        /* keep in memory only */
+      }
+    }
   }, [chats, ready]);
 
   useEffect(() => {
@@ -204,7 +297,7 @@ export default function Home() {
     if (activeId) patchChat(activeId, (c) => ({ ...c, model: id }));
   };
 
-  /* ---------------- streaming ---------------- */
+  /* ---------------- streaming (chat mode) ---------------- */
 
   const streamAssistant = useCallback(
     async (chatId, history) => {
@@ -226,7 +319,7 @@ export default function Home() {
 
       const payloadMessages = [
         ...(settings.systemPrompt ? [{ role: "system", content: settings.systemPrompt }] : []),
-        ...history.map((m) => ({ role: m.role, content: m.content })),
+        ...toChatMessages(history),
       ];
 
       try {
@@ -262,25 +355,16 @@ export default function Home() {
 
         const reader = res.body.getReader();
         const dec = new TextDecoder();
-        let first = true;
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
           const chunk = dec.decode(value, { stream: true });
           if (chunk) {
-            if (first) {
-              first = false;
-              patchMessage(chatId, assistantId, (m) => ({
-                ...m,
-                pending: false,
-                content: m.content + chunk,
-              }));
-            } else {
-              patchMessage(chatId, assistantId, (m) => ({
-                ...m,
-                content: m.content + chunk,
-              }));
-            }
+            patchMessage(chatId, assistantId, (m) => ({
+              ...m,
+              pending: false,
+              content: m.content + chunk,
+            }));
           }
         }
         patchMessage(chatId, assistantId, (m) => ({ ...m, pending: false }));
@@ -307,12 +391,277 @@ export default function Home() {
     [chats, patchChat, patchMessage, settings]
   );
 
+  /* ---------------- agent mode ---------------- */
+
+  const agentLoop = async (chatId, runId, task, signal, context, model) => {
+    const patch = (fn) => patchMessage(chatId, runId, fn);
+    const maxSteps = Math.min(Math.max(Number(settings.agentMaxSteps) || 8, 2), 16);
+
+    const loopMsgs = [
+      { role: "system", content: AGENT_PROMPT },
+      {
+        role: "user",
+        content: context
+          ? `TASK:\n${task}\n\nRecent conversation for context (the task may relate to it):\n${context}`
+          : `TASK:\n${task}`,
+      },
+    ];
+
+    let stepsUsed = 0;
+    let parseFails = 0;
+    let final = "";
+    let stepIdx = -1;
+    const fileMap = {}; // local mirror of files for appends
+
+    const pushStep = (step) => {
+      stepIdx += 1;
+      patch((m) => ({ ...m, steps: [...(m.steps || []), step] }));
+      return stepIdx;
+    };
+    const patchStep = (idx, fn) =>
+      patch((m) => ({ ...m, steps: (m.steps || []).map((s, i) => (i === idx ? fn(s) : s)) }));
+
+    try {
+      while (stepsUsed < maxSteps) {
+        patch((m) => ({ ...m, phase: "thinking" }));
+
+        const raw = await callChat({
+          messages: loopMsgs,
+          model,
+          temperature: Math.min(settings.temperature, 0.4),
+          maxTokens: 4096,
+          apiKey: settings.apiKey,
+          signal,
+        });
+
+        const parsed = extractJson(raw);
+
+        if (!parsed || (!parsed.action && parsed.final === undefined)) {
+          parseFails++;
+          if (parseFails >= 2) {
+            const prose = raw && raw.trim() && !raw.trim().startsWith("{") ? raw.trim() : "";
+            if (prose) {
+              final = prose;
+              break;
+            }
+            throw new Error(
+              "The model could not follow the agent protocol (invalid JSON twice in a row). Try a stronger model, e.g. Llama 3.3 70B or Llama 3.1 405B."
+            );
+          }
+          loopMsgs.push(
+            { role: "assistant", content: String(raw).slice(0, 1500) },
+            {
+              role: "user",
+              content:
+                'That was not a single valid JSON object. Reply again with EXACTLY one JSON object: {"thought":"...","action":{"tool":"...","input":{...}}} or {"thought":"...","final":"..."}. No other text.',
+            }
+          );
+          continue;
+        }
+        parseFails = 0;
+
+        // Terminal reply?
+        if (parsed.final !== undefined || parsed.action?.tool === "finish") {
+          final =
+            typeof parsed.final === "string" && parsed.final.trim()
+              ? parsed.final
+              : parsed.action?.input?.summary || "Task complete.";
+          break;
+        }
+
+        const tool = parsed.action?.tool;
+        const input = parsed.action?.input || {};
+        const thought = typeof parsed.thought === "string" ? parsed.thought.slice(0, 500) : "";
+
+        loopMsgs.push({ role: "assistant", content: JSON.stringify(parsed) });
+
+        if (!AGENT_TOOLS.includes(tool)) {
+          pushStep({
+            thought,
+            tool: tool || "unknown",
+            input,
+            observation: `Unknown tool. Available tools: ${AGENT_TOOLS.join(", ")}.`,
+            ok: false,
+            ms: 0,
+          });
+          loopMsgs.push({
+            role: "user",
+            content: `OBSERVATION:\nError: unknown tool "${tool}".`,
+          });
+          stepsUsed++;
+          continue;
+        }
+
+        const idx = pushStep({ thought, tool, input, observation: null, ok: null, ms: 0 });
+        patch((m) => ({ ...m, phase: "acting" }));
+
+        const t0 = Date.now();
+        let observation;
+        let ok = true;
+
+        try {
+          if (tool === "write_file") {
+            const path = sanitizePath(input.path);
+            const content = String(input.content ?? "");
+            fileMap[path] = content;
+            patch((m) => ({
+              ...m,
+              files: [...(m.files || []).filter((f) => f.path !== path), { path, content }],
+            }));
+            observation = `File "${path}" created (${content.length} characters).`;
+          } else if (tool === "append_file") {
+            const path = sanitizePath(input.path);
+            const content = String(input.content ?? "");
+            if (fileMap[path] === undefined) {
+              ok = false;
+              observation = `Error: file "${path}" does not exist yet. Use write_file first.`;
+            } else {
+              fileMap[path] += content;
+              patch((m) => ({
+                ...m,
+                files: (m.files || []).map((f) =>
+                  f.path === path ? { ...f, content: fileMap[path] } : f
+                ),
+              }));
+              observation = `Appended ${content.length} characters to "${path}" (now ${fileMap[path].length} total).`;
+            }
+          } else {
+            const r = await executeTool(tool, input, signal);
+            ok = r.ok;
+            observation = r.ok ? r.result : `TOOL ERROR: ${r.error}`;
+          }
+        } catch (e) {
+          if (e && e.name === "AbortError") throw e;
+          ok = false;
+          observation = `TOOL ERROR: ${e.message || e}`;
+        }
+
+        const ms = Date.now() - t0;
+        patchStep(idx, (s) => ({
+          ...s,
+          observation: String(observation).slice(0, 8000),
+          ok,
+          ms,
+        }));
+        patch((m) => ({ ...m, phase: "thinking" }));
+
+        loopMsgs.push({
+          role: "user",
+          content: `OBSERVATION:\n${String(observation).slice(0, 5000)}`,
+        });
+        stepsUsed++;
+      }
+
+      // Step budget exhausted — force a final summary.
+      if (!final) {
+        loopMsgs.push({
+          role: "user",
+          content:
+            'You have reached the maximum number of steps. Reply now with your final JSON {"thought":"...","final":"..."} — summarize what was accomplished and list any files you created. Do not call any more tools.',
+        });
+        patch((m) => ({ ...m, phase: "thinking" }));
+        const raw = await callChat({
+          messages: loopMsgs,
+          model,
+          temperature: Math.min(settings.temperature, 0.4),
+          maxTokens: 2048,
+          apiKey: settings.apiKey,
+          signal,
+        });
+        const parsed = extractJson(raw);
+        final =
+          (parsed && typeof parsed.final === "string" && parsed.final.trim()) ||
+          "The agent used all its steps. Partial results and files are kept above — you can retry the task or continue in Chat mode.";
+      }
+
+      patch((m) => ({ ...m, status: "done", phase: null, final }));
+    } catch (e) {
+      if (e && e.name === "AbortError") {
+        patch((m) => ({ ...m, status: "stopped", phase: null }));
+      } else {
+        patch((m) => ({ ...m, status: "error", phase: null, error: e.message || String(e) }));
+      }
+    }
+  };
+
+  const sendAgent = async (task) => {
+    if (!activeChat) return;
+    const model = activeChat.model || settings.model;
+    const context = contextFrom(activeChat.messages);
+    const chatId = activeChat.id;
+
+    const userMsg = { id: uid(), role: "user", content: task };
+    const run = {
+      id: uid(),
+      role: "agent",
+      model,
+      task,
+      status: "running",
+      phase: "thinking",
+      steps: [],
+      files: [],
+      final: "",
+      error: "",
+    };
+
+    patchChat(chatId, (c) => ({
+      ...c,
+      title: c.messages.length === 0 ? titleFrom(task) : c.title,
+      updatedAt: Date.now(),
+      messages: [...c.messages, userMsg, run],
+    }));
+
+    setInput("");
+    stickToBottom.current = true;
+    setStreaming(true);
+    const controller = new AbortController();
+    abortRef.current = controller;
+
+    try {
+      await agentLoop(chatId, run.id, task, controller.signal, context, model);
+    } finally {
+      setStreaming(false);
+      abortRef.current = null;
+    }
+  };
+
+  const retryAgent = async (run) => {
+    if (streaming) return;
+    const chat = chats.find((c) => c.messages.some((m) => m.id === run.id));
+    if (!chat) return;
+    const idx = chat.messages.findIndex((m) => m.id === run.id);
+    const context = contextFrom(chat.messages.slice(0, Math.max(0, idx - 1)));
+
+    setStreaming(true);
+    const controller = new AbortController();
+    abortRef.current = controller;
+    patchMessage(chat.id, run.id, () => ({
+      ...run,
+      status: "running",
+      phase: "thinking",
+      steps: [],
+      files: [],
+      final: "",
+      error: "",
+    }));
+
+    try {
+      await agentLoop(chat.id, run.id, run.task, controller.signal, context, run.model);
+    } finally {
+      setStreaming(false);
+      abortRef.current = null;
+    }
+  };
+
+  /* ---------------- send / misc ---------------- */
+
   const send = async (text) => {
     const content = (text ?? input).trim();
     if (!content || streaming || !activeChat) return;
+    if (mode === "agent") return sendAgent(content);
 
     const userMsg = { id: uid(), role: "user", content };
-    const history = [...activeChat.messages.filter((m) => !m.pending || m.content), userMsg];
+    const history = [...activeChat.messages, userMsg];
 
     patchChat(activeChat.id, (c) => ({
       ...c,
@@ -354,6 +703,8 @@ export default function Home() {
     () => [...chats].sort((a, b) => b.updatedAt - a.updatedAt),
     [chats]
   );
+  const suggestions = mode === "agent" ? AGENT_SUGGESTIONS : CHAT_SUGGESTIONS;
+  const currentModel = activeChat?.model || settings.model;
 
   return (
     <div className="app">
@@ -447,7 +798,7 @@ export default function Home() {
             <ModelPicker
               models={models}
               source={modelSource}
-              value={activeChat?.model || settings.model}
+              value={currentModel}
               onChange={pickModel}
               onRefresh={() => fetchModels(settings.apiKey)}
               loading={modelsLoading}
@@ -492,21 +843,31 @@ export default function Home() {
                   <path d="M37 5 L13 37 h13 L25 59 L51 25 H36 Z" fill="currentColor" />
                 </svg>
               </span>
-              <h1>
-                Chat with <span className="accent">20+ frontier AIs</span>
-              </h1>
-              <p className="empty-sub">
-                One interface, every model — Llama, Nemotron, DeepSeek, Qwen, Mistral and more,
-                streamed live through the NVIDIA NIM API.
-              </p>
+              {mode === "agent" ? (
+                <>
+                  <h1>
+                    Say what to make — <span className="accent">the agent builds it</span>
+                  </h1>
+                  <p className="empty-sub">
+                    Agent mode: Forgenite plans the work, then runs automatically — searching the
+                    web, reading pages, executing code and writing complete files — step by step
+                    until your task is done.
+                  </p>
+                </>
+              ) : (
+                <>
+                  <h1>
+                    Chat with <span className="accent">20+ frontier AIs</span>
+                  </h1>
+                  <p className="empty-sub">
+                    One interface, every model — Llama, Nemotron, DeepSeek, Qwen, Mistral and more,
+                    streamed live through the NVIDIA NIM API.
+                  </p>
+                </>
+              )}
               <div className="sugg-grid">
-                {SUGGESTIONS.map((s) => (
-                  <button
-                    type="button"
-                    key={s.title}
-                    className="sugg"
-                    onClick={() => send(s.text)}
-                  >
+                {suggestions.map((s) => (
+                  <button type="button" key={s.title} className="sugg" onClick={() => send(s.text)}>
                     <span className="sugg-icon">{s.icon}</span>
                     <span className="sugg-title">{s.title}</span>
                     <span className="sugg-text">{s.text}</span>
@@ -516,48 +877,63 @@ export default function Home() {
             </div>
           ) : (
             <div className="msgs">
-              {activeChat.messages.map((m) => (
-                <div key={m.id} className={"msg " + (m.role === "user" ? "msg-user" : "msg-assistant")}>
-                  <div className={"avatar " + (m.role === "user" ? "av-user" : "av-bot")}>
-                    {m.role === "user" ? (
-                      "Y"
-                    ) : (
-                      <svg width="15" height="15" viewBox="0 0 64 64" aria-hidden="true">
-                        <path d="M37 5 L13 37 h13 L25 59 L51 25 H36 Z" fill="currentColor" />
-                      </svg>
-                    )}
-                  </div>
-                  <div className="msg-main">
-                    <div className="msg-head">
-                      <span className="msg-name">{m.role === "user" ? "You" : "Forgenite"}</span>
-                      {m.role === "assistant" && m.model && (
-                        <span className="chip">{shortName(m.model)}</span>
-                      )}
-                      {m.pending && !m.content && (
-                        <span className="typing">
-                          <i /><i /><i />
-                        </span>
+              {activeChat.messages.map((m) =>
+                m.role === "agent" ? (
+                  <AgentRun
+                    key={m.id}
+                    run={m}
+                    streaming={streaming}
+                    onOpenFile={(f) => setViewFile(f)}
+                    onRetry={retryAgent}
+                  />
+                ) : (
+                  <div
+                    key={m.id}
+                    className={"msg " + (m.role === "user" ? "msg-user" : "msg-assistant")}
+                  >
+                    <div className={"avatar " + (m.role === "user" ? "av-user" : "av-bot")}>
+                      {m.role === "user" ? (
+                        "Y"
+                      ) : (
+                        <svg width="15" height="15" viewBox="0 0 64 64" aria-hidden="true">
+                          <path d="M37 5 L13 37 h13 L25 59 L51 25 H36 Z" fill="currentColor" />
+                        </svg>
                       )}
                     </div>
-                    <div className={"msg-body" + (m.error ? " msg-error" : "")}>
-                      <Markdown text={m.content} />
-                      {m.pending && m.content && <span className="cursor" />}
-                    </div>
-                    {!m.pending && m.content && (
-                      <div className="msg-actions">
-                        <button type="button" className="copy-btn" onClick={() => copyMessage(m)}>
-                          {copiedId === m.id ? "Copied!" : "Copy"}
-                        </button>
-                        {m.role === "assistant" && !streaming && m.error && (
-                          <button type="button" className="copy-btn" onClick={regenerate}>
-                            Retry
-                          </button>
+                    <div className="msg-main">
+                      <div className="msg-head">
+                        <span className="msg-name">{m.role === "user" ? "You" : "Forgenite"}</span>
+                        {m.role === "assistant" && m.model && (
+                          <span className="chip">{shortName(m.model)}</span>
+                        )}
+                        {m.pending && !m.content && (
+                          <span className="typing">
+                            <i />
+                            <i />
+                            <i />
+                          </span>
                         )}
                       </div>
-                    )}
+                      <div className={"msg-body" + (m.error ? " msg-error" : "")}>
+                        <Markdown text={m.content} />
+                        {m.pending && m.content && <span className="cursor" />}
+                      </div>
+                      {!m.pending && m.content && (
+                        <div className="msg-actions">
+                          <button type="button" className="copy-btn" onClick={() => copyMessage(m)}>
+                            {copiedId === m.id ? "Copied!" : "Copy"}
+                          </button>
+                          {m.role === "assistant" && !streaming && m.error && (
+                            <button type="button" className="copy-btn" onClick={regenerate}>
+                              Retry
+                            </button>
+                          )}
+                        </div>
+                      )}
+                    </div>
                   </div>
-                </div>
-              ))}
+                )
+              )}
             </div>
           )}
         </div>
@@ -577,12 +953,43 @@ export default function Home() {
               </button>
             </div>
           )}
+
+          <div className="mode-row">
+            <div className="mode-toggle" role="group" aria-label="Mode">
+              <button
+                type="button"
+                className={"mode-btn" + (mode === "chat" ? " on" : "")}
+                onClick={() => setSettings((s) => ({ ...s, mode: "chat" }))}
+                title="Classic streaming chat"
+              >
+                💬 Chat
+              </button>
+              <button
+                type="button"
+                className={"mode-btn" + (mode === "agent" ? " on" : "")}
+                onClick={() => setSettings((s) => ({ ...s, mode: "agent" }))}
+                title="Autonomous agent — plans and uses tools automatically"
+              >
+                🤖 Agent
+              </button>
+            </div>
+            {mode === "agent" && (
+              <span className="mode-hint">
+                The agent plans and runs tools automatically until your task is done
+              </span>
+            )}
+          </div>
+
           <div className="comp-inner">
             <textarea
               ref={taRef}
               rows={1}
               value={input}
-              placeholder={`Message ${shortName(activeChat?.model || settings.model)}…`}
+              placeholder={
+                mode === "agent"
+                  ? "Tell the agent what to make — e.g. “Build me a landing page for my coffee shop”…"
+                  : `Message ${shortName(currentModel)}…`
+              }
               onChange={(e) => setInput(e.target.value)}
               onKeyDown={(e) => {
                 if (e.key === "Enter" && !e.shiftKey) {
@@ -604,23 +1011,43 @@ export default function Home() {
                 className="send-btn"
                 onClick={() => send()}
                 disabled={!input.trim()}
-                aria-label="Send message"
+                aria-label={mode === "agent" ? "Run agent" : "Send message"}
               >
-                <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
-                  <path
-                    d="M2.5 8L13.5 2.5 10 8l3.5 5.5L2.5 8zM2.5 8H10"
-                    stroke="currentColor"
-                    strokeWidth="1.5"
-                    strokeLinejoin="round"
-                  />
-                </svg>
+                {mode === "agent" ? (
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
+                    <path
+                      d="M4.5 3.5L13 8l-8.5 4.5V3.5z"
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                ) : (
+                  <svg width="16" height="16" viewBox="0 0 16 16" fill="none">
+                    <path
+                      d="M2.5 8L13.5 2.5 10 8l3.5 5.5L2.5 8zM2.5 8H10"
+                      stroke="currentColor"
+                      strokeWidth="1.5"
+                      strokeLinejoin="round"
+                    />
+                  </svg>
+                )}
               </button>
             )}
           </div>
           <div className="hint">
-            Forgenite can make mistakes — verify important info. Model:{" "}
-            <span className="mono">{activeChat?.model || settings.model}</span>
-            {hasServerKey ? " · server key active" : settings.apiKey ? " · browser key active" : ""}
+            {mode === "agent" ? (
+              <>
+                🤖 Agent mode · up to {settings.agentMaxSteps} steps · model{" "}
+                <span className="mono">{currentModel}</span>
+              </>
+            ) : (
+              <>
+                Forgenite can make mistakes — verify important info. Model:{" "}
+                <span className="mono">{currentModel}</span>
+                {hasServerKey ? " · server key active" : settings.apiKey ? " · browser key active" : ""}
+              </>
+            )}
           </div>
         </div>
       </main>
@@ -636,6 +1063,8 @@ export default function Home() {
           fetchModels(s.apiKey);
         }}
       />
+
+      <FileViewer file={viewFile} onClose={() => setViewFile(null)} />
     </div>
   );
 }

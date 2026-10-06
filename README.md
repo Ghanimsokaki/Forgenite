@@ -69,32 +69,49 @@ The free tier includes credits that are plenty for personal use.
 ## 🏗 How it works
 
 ```
-┌──────────────┐  fetch /api/chat      ┌──────────────────────┐  HTTPS   ┌───────────────────┐
-│  Browser UI  │ ────────────────────▶ │  Next.js API route   │ ───────▶ │  NVIDIA NIM API   │
-│  (React)     │ ◀──────────────────── │  (streaming proxy)   │ ◀─────── │  (OpenAI-compatible)
-└──────────────┘   text/plain stream   └──────────────────────┘  SSE     └───────────────────┘
+                        ┌───────────────────────────────────────────────┐
+                        │                Browser (React)                │
+                        │  Chat mode          Agent mode                │
+                        │  ┌─────────────┐    ┌──────────────────────┐  │   tools: web_search,
+                        │  │ stream reply │    │ autonomous loop:     │  │   open_url, run_javascript
+                        │  └──────┬──────┘    │ think → act → watch  │  │
+                        │         │           └──────────┬───────────┘  │
+                        └─────────┼──────────────────────┼──────────────┘
+                     /api/chat    │                /api/chat ─┐   /api/tools
+                                  ▼                            ▼          ▼
+                        ┌──────────────────┐   ┌──────────────────┐ ┌──────────────┐
+                        │ Next.js API route │▶ │  NVIDIA NIM API  │ │ DuckDuckGo / │
+                        │ (streaming proxy) │◀ │ (chat models)    │ │ Wikipedia /  │
+                        └──────────────────┘   └──────────────────┘ │ page fetch / │
+                                                                     │ JS sandbox   │
+                                                                     └──────────────┘
 ```
 
 - The browser never talks to NVIDIA directly — the API key stays on the server.
 - `app/api/chat/route.js` proxies `POST https://integrate.api.nvidia.com/v1/chat/completions` with `stream: true`, parses the SSE and forwards plain-text deltas to the browser.
 - `app/api/models/route.js` returns the live model catalogue from `GET /v1/models` (falls back to the curated list in `lib/models.js` when no key is set).
+- **Agent mode** (`lib/agent.js`) runs the autonomy loop *in the browser*: each model turn is a short `/api/chat` call (so no serverless time limits), the reply is a strict JSON protocol (`{"thought","action"}` / `{"thought","final"}`), and tool calls dispatch to `/api/tools` (server) or to local artifact storage (`write_file`/`append_file`). The loop runs unattended until the model emits `final`, hits the step limit (configurable, default 8), or you press Stop.
 
 ## 📁 Project structure
 
 ```
 app/
   layout.js            # root layout + metadata
-  page.js              # chat UI (client component)
+  page.js              # chat + agent UI (client component)
   globals.css          # theme
   icon.svg             # favicon
   api/
     chat/route.js      # streaming proxy → NVIDIA NIM chat completions
     models/route.js    # model list (live / curated fallback)
+    tools/route.js     # agent tools: web_search, open_url, run_javascript
 components/
+  AgentRun.js          # live agent timeline (steps, tools, files)
+  FileViewer.js        # artifact viewer: copy / download / preview HTML
   Markdown.js          # dependency-free markdown renderer
   ModelPicker.js       # the AI model dropdown
-  Settings.js          # settings modal (API key, sampling params)
+  Settings.js          # settings modal (API key, sampling, agent steps)
 lib/
+  agent.js             # agent prompt, JSON protocol, loop transport
   models.js            # curated model catalogue + helpers
 ```
 

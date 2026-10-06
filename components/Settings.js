@@ -115,6 +115,25 @@ export default function SettingsModal({ open, settings, hasServerKey, onSave, on
               <p className="hint-line">Upper limit on the length of each reply.</p>
             </div>
           </div>
+
+          <div className="field">
+            <label htmlFor="st-steps">
+              🤖 Agent max steps: <strong>{local.agentMaxSteps}</strong>
+            </label>
+            <input
+              id="st-steps"
+              type="range"
+              min="2"
+              max="16"
+              step="1"
+              value={local.agentMaxSteps}
+              onChange={(e) => set({ agentMaxSteps: Number(e.target.value) })}
+            />
+            <p className="hint-line">
+              How many tool steps the autonomous agent may take per task (searches, code runs,
+              file writes…).
+            </p>
+          </div>
         </div>
 
         <div className="modal-foot">
