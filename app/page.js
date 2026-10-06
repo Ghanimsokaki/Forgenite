@@ -857,11 +857,12 @@ export default function Home() {
               ) : (
                 <>
                   <h1>
-                    Chat with <span className="accent">20+ frontier AIs</span>
+                    Chat with <span className="accent">90+ frontier AIs</span>
                   </h1>
                   <p className="empty-sub">
-                    One interface, every model — Llama, Nemotron, DeepSeek, Qwen, Mistral and more,
-                    streamed live through the NVIDIA NIM API.
+                    One interface, every model — GLM-5.3, Kimi K3, DeepSeek V4, Nemotron 3,
+                    GPT-OSS, Llama, Qwen3, MiniMax and more, streamed live through the NVIDIA NIM
+                    API. Add a key to unlock the full live list.
                   </p>
                 </>
               )}

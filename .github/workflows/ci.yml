@@ -1,0 +1,44 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build:
+    name: Build app
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm run build
+
+  key-check:
+    name: Verify NVIDIA NIM key
+    # Verifies the NVIDIA_API_KEY GitHub secret actually works.
+    # Add it under: repo Settings -> Secrets and variables -> Actions.
+    # If the secret is not set, this job simply skips.
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Check key against the NVIDIA NIM API
+        env:
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+        run: |
+          if [ -z "$NVIDIA_API_KEY" ]; then
+            echo "ℹ️ NVIDIA_API_KEY secret not set — skipping key check."
+            exit 0
+          fi
+          echo "Testing key against https://integrate.api.nvidia.com/v1/models ..."
+          if curl -sS -f -H "Authorization: Bearer $NVIDIA_API_KEY" \
+              https://integrate.api.nvidia.com/v1/models -o /dev/null; then
+            echo "✅ NVIDIA_API_KEY is valid and can reach NVIDIA NIM."
+          else
+            echo "❌ Key check failed — the key is invalid or cannot reach NVIDIA NIM."
+            exit 1
+          fi

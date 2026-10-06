@@ -1,9 +1,9 @@
 import "./globals.css";
 
 export const metadata = {
-  title: "Forgenite · Chat with 20+ AIs on NVIDIA NIM",
+  title: "Forgenite · Chat with 90+ AIs on NVIDIA NIM",
   description:
-    "Forgenite is a fast, clean chatbot that lets you talk to dozens of frontier AI models — Llama, Nemotron, DeepSeek, Qwen, Mistral and more — through the NVIDIA NIM API.",
+    "Forgenite is a fast, clean chatbot + autonomous agent that lets you talk to dozens of frontier AI models — GLM-5.3, Kimi K3, DeepSeek V4, Nemotron 3, GPT-OSS, Llama, Qwen3 and more — through the NVIDIA NIM API.",
 };
 
 export const viewport = {

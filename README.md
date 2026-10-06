@@ -11,7 +11,7 @@ Forgenite is a streaming chatbot that gives you a single interface to every mode
 ## ✨ Features
 
 - 💬 **Real-time streaming chat** — replies stream token-by-token via Server-Sent Events, with a stop button
-- 🤖 **Model picker with the full AI list** — a curated preset of popular models out of the box, and the **live catalogue of every NIM model** (100+) once an API key is configured, searchable by name or publisher
+- 🤖 **Model picker with the full AI list** — a curated preset of **60+ current models** (GLM-5.3, GLM-5.3-Flash, Kimi K3, DeepSeek V4, Nemotron 3 Ultra, GPT-OSS, Llama 4 Maverick, Qwen3, MiniMax M3, Inkling, Mistral Large 3…), and the **live catalogue of every model your key can call** (~90–100) once an API key is configured, searchable by name or publisher
 - 🗂 **Conversation history** — multiple chats saved in your browser (localStorage), with delete + auto-titles
 - ⚙️ **Settings** — system prompt, temperature, max tokens
 - 🔑 **Two ways to authenticate** — server-side `NVIDIA_API_KEY` env var (recommended, never leaves the server) or a personal key pasted into Settings (stored only in your browser)
@@ -55,6 +55,19 @@ npm run dev
 Open [http://localhost:3000](http://localhost:3000).
 
 > You can also skip `.env.local` entirely and paste a key in the app's **Settings** dialog — it's stored only in your browser.
+
+## 🛠 Troubleshooting
+
+| Error | Meaning | Fix |
+| --- | --- | --- |
+| **502** "Could not reach NVIDIA NIM (network error)" | The server running the app can't reach NVIDIA — blocked network, or you're in a **sandboxed preview without internet** | Run locally or on Vercel; check firewall |
+| **401** "No NVIDIA API key configured" | No key anywhere | See [SECRETS.md](./SECRETS.md) §2 |
+| **401/403** "Authorization failed" | Bad key, or your account isn't registered for that model family | Re-copy key; open the model page on build.nvidia.com → **"Try API"** |
+| **404** "Not found for account" | Model not callable with your key | Pick another model (the live list shows what your key can call) |
+| **429** | Free tier is ~40 requests/min, shared across all models | Wait a minute |
+| **5xx** | Model overloaded | Retry / switch models |
+
+Full secret-setup walkthrough (NVIDIA, Vercel env vars, GitHub Actions secrets): **[SECRETS.md](./SECRETS.md)**
 
 ## 🔑 Getting an NVIDIA NIM API key
 

@@ -88,7 +88,13 @@ export async function POST(req) {
     });
   } catch (e) {
     return NextResponse.json(
-      { error: `Could not reach NVIDIA NIM: ${e.message}` },
+      {
+        error:
+          `Could not reach NVIDIA NIM (network error: ${e.message}). ` +
+          "If you are viewing this inside a sandboxed preview, outbound internet is blocked there — " +
+          "run the app locally (npm run dev) or deploy it on Vercel and it will connect. " +
+          "Otherwise check your internet connection / firewall and try again.",
+      },
       { status: 502 }
     );
   }
@@ -106,10 +112,26 @@ export async function POST(req) {
     } catch {
       // keep default
     }
-    if (upstream.status === 401 || upstream.status === 403) {
-      msg += " — check your NVIDIA API key (is it a valid nvapi- key?).";
+
+    const s = upstream.status;
+    let hint = "";
+    if (s === 401 || s === 403) {
+      hint =
+        " — check that your key is a valid nvapi- key, and that your account can use this model family " +
+        '(open the model page on build.nvidia.com and click "Try API" once to register for it).';
+    } else if (s === 404) {
+      hint =
+        " — this model is not available on your account/key. Pick another model from the list " +
+        "(with a key set, the model picker loads the live list of exactly what you can call).";
+    } else if (s === 429) {
+      hint =
+        " — rate limit hit. The NVIDIA free tier allows ~40 requests/minute shared across ALL models; " +
+        "wait a moment and try again.";
+    } else if (s >= 500) {
+      hint = " — the model may be overloaded or temporarily down. Try again or switch models.";
     }
-    return NextResponse.json({ error: msg }, { status: upstream.status });
+
+    return NextResponse.json({ error: msg + hint }, { status: upstream.status });
   }
 
   const contentType = upstream.headers.get("content-type") || "";
