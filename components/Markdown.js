@@ -7,7 +7,39 @@ import { useMemo, useState } from "react";
 /*  fenced code blocks, inline code, bold, italic, links, autolinks,   */
 /*  unordered/ordered lists, headings, blockquotes.                    */
 /*  Handles unterminated ``` fences gracefully while streaming.        */
+/*                                                                     */
+/*  Reasoning models stream their chain of thought inside              */
+/*  <think> … </think> — those blocks are pulled out first (before any */
+/*  code-fence parsing) and rendered as collapsible <details>.         */
 /* ------------------------------------------------------------------ */
+
+const THINK_RE = /<think>([\s\S]*?)<\/think>/gi;
+
+/** Split text into plain-text and <think> segments (tolerates an unterminated block while streaming). */
+function splitThinks(text) {
+  const out = [];
+  let last = 0;
+  let m;
+  const re = new RegExp(THINK_RE.source, "gi");
+
+  while ((m = re.exec(text))) {
+    if (m.index > last) out.push({ type: "text", text: text.slice(last, m.index) });
+    out.push({ type: "think", text: m[1].replace(/^\n/, ""), done: true });
+    last = re.lastIndex;
+  }
+
+  let rest = text.slice(last);
+  const open = /<think>/i.exec(rest);
+  if (open) {
+    if (open.index > 0) out.push({ type: "text", text: rest.slice(0, open.index) });
+    rest = rest.slice(open.index + open[0].length).replace(/^\n/, "");
+    out.push({ type: "think", text: rest, done: false });
+    rest = "";
+  }
+  if (rest) out.push({ type: "text", text: rest });
+
+  return out;
+}
 
 function splitFences(text) {
   const out = [];
@@ -208,17 +240,45 @@ function CodeBlock({ lang, code }) {
   );
 }
 
+function ThinkBlock({ text, done }) {
+  // Streaming thoughts start expanded (you can watch it think); completed ones
+  // start collapsed — the user still gets the native toggle by clicking.
+  const [open, setOpen] = useState(!done);
+
+  return (
+    <details
+      className="thinkblock"
+      open={open}
+      onToggle={(e) => setOpen(e.currentTarget.open)}
+    >
+      <summary>🧠 Thinking… (click to expand)</summary>
+      <pre>{text}</pre>
+    </details>
+  );
+}
+
+/** Carve out <think> blocks first, then parse code fences inside the rest. */
+function splitBlocks(text) {
+  const out = [];
+  for (const part of splitThinks(text)) {
+    if (part.type === "think") {
+      out.push(part);
+      continue;
+    }
+    for (const b of splitFences(part.text)) out.push(b);
+  }
+  return out;
+}
+
 export default function Markdown({ text }) {
-  const blocks = useMemo(() => splitFences(text || ""), [text]);
+  const blocks = useMemo(() => splitBlocks(text || ""), [text]);
   return (
     <div className="md">
-      {blocks.map((b, i) =>
-        b.type === "code" ? (
-          <CodeBlock key={i} lang={b.lang} code={b.code} />
-        ) : (
-          <TextBlock key={i} text={b.text} kp={i} />
-        )
-      )}
+      {blocks.map((b, i) => {
+        if (b.type === "code") return <CodeBlock key={i} lang={b.lang} code={b.code} />;
+        if (b.type === "think") return <ThinkBlock key={i} text={b.text} done={b.done} />;
+        return <TextBlock key={i} text={b.text} kp={i} />;
+      })}
     </div>
   );
 }
