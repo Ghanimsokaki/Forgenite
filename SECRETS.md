@@ -70,11 +70,33 @@ Click the ⚙️ gear in the top bar → **NVIDIA API key** → paste → **Save
 - Stored **only in your browser** (localStorage) — nothing is sent anywhere except to your own `/api/chat` route, which forwards it to NVIDIA for that single request.
 - Great for trying the app instantly, but each browser/user would need to do this. Use option **A** for a real deployment.
 
+### A.2 Netlify — alternative host
+
+The repo ships with a `netlify.toml` that uses the `@netlify/plugin-nextjs` plugin and pins Node 22, so deploying to Netlify works out of the box.
+
+**Netlify dashboard:**
+1. Go to **[app.netlify.com](https://app.netlify.com)** → **Add new site** → **Import an existing project** → pick the GitHub repo.
+2. Under **Site settings → Environment variables** (set this *before* the first deploy, or trigger a redeploy after):
+   - **Key:** `NVIDIA_API_KEY`
+   - **Values:** `nvapi-...`
+   - **Scopes:** ☑ All scopes (Build, Deploy, Post processing, Functions, Runtime)
+3. Trigger a deploy from the **Deploys** page. The build command (`npm run build`) and publish directory (`.next`) are read automatically from `netlify.toml`.
+
+**Or with the Netlify CLI:**
+```bash
+npm install -g netlify-cli
+netlify login
+netlify init                       # link/choose site
+netlify env:set NVIDIA_API_KEY "nvapi-..."
+netlify deploy --prod
+```
+
 ### Which one should I use?
 
 | Situation | Use |
 | --- | --- |
-| Deployed on Vercel | **A** — env var |
+| Deployed on Vercel | **A** — Vercel env var |
+| Deployed on Netlify | **A.2** — Netlify env var |
 | Hacking on it locally | **B** — `.env.local` |
 | Just want to try it in 10 seconds | **C** — Settings dialog |
 

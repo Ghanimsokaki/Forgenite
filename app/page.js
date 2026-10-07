@@ -18,17 +18,27 @@ import { CURATED_MODELS, DEFAULT_MODEL, shortName } from "@/lib/models";
 
 const LS_CHATS = "forgenite.chats.v1";
 const LS_SETTINGS = "forgenite.settings.v1";
+const LS_FAILED = "forgenite.failed.v1";
 
 const DEFAULT_SETTINGS = {
   apiKey: "",
   systemPrompt:
     "You are Forgenite, a helpful AI assistant served through NVIDIA NIM. Answer clearly and concisely, and use Markdown formatting (including code blocks) when it helps.",
   temperature: 0.7,
-  maxTokens: 1024,
+  maxTokens: 4096,
   model: DEFAULT_MODEL,
   mode: "chat",
   agentMaxSteps: 8,
 };
+
+const FAILED_ERR_RE = /not found for account|not available on your account|authorization failed/i;
+
+/** Strip completed <think>…</think> blocks from assistant content before
+ *  re-sending as history — reasoning was already rendered and re-sending
+ *  wastes tokens / confuses some models. */
+function stripThinkBlocks(s) {
+  return String(s || "").replace(/<think>[\s\S]*?<\/think>/gi, "");
+}
 
 const GITHUB_URL = "https://github.com/Ghanimsokaki/Forgenite";
 
@@ -76,12 +86,14 @@ function toChatMessages(msgs) {
       m.role === "agent"
         ? {
             role: "assistant",
-            content:
+            content: stripThinkBlocks(
               m.final ||
-              `*(agent run: ${m.steps?.length || 0} steps, ${m.files?.length || 0} files created)*`,
+                `*(agent run: ${m.steps?.length || 0} steps, ${m.files?.length || 0} files created)*`
+            ),
           }
-        : { role: m.role, content: m.content }
-    );
+        : { role: m.role, content: stripThinkBlocks(m.content) }
+    )
+    .filter((m) => m.role === "user" || m.content.length > 0);
 }
 
 const CHAT_SUGGESTIONS = [
@@ -124,6 +136,7 @@ export default function Home() {
   const [modelSource, setModelSource] = useState("fallback");
   const [modelsLoading, setModelsLoading] = useState(false);
   const [hasServerKey, setHasServerKey] = useState(false);
+  const [failedModels, setFailedModels] = useState([]);
 
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
@@ -169,8 +182,27 @@ export default function Home() {
     } catch {
       /* defaults */
     }
+    try {
+      const rawF = localStorage.getItem(LS_FAILED);
+      if (rawF) {
+        const parsed = JSON.parse(rawF);
+        if (Array.isArray(parsed)) setFailedModels(parsed);
+      }
+    } catch {
+      /* ignore */
+    }
     setReady(true);
   }, []);
+
+  // Persist failed-models list.
+  useEffect(() => {
+    if (!ready) return;
+    try {
+      localStorage.setItem(LS_FAILED, JSON.stringify(failedModels));
+    } catch {
+      /* ignore */
+    }
+  }, [failedModels, ready]);
 
   useEffect(() => {
     if (!ready) return;
@@ -297,6 +329,15 @@ export default function Home() {
     if (activeId) patchChat(activeId, (c) => ({ ...c, model: id }));
   };
 
+  const markModelFailed = useCallback((id, reason) => {
+    if (!id) return;
+    setFailedModels((prev) => {
+      if (prev.includes(id)) return prev;
+      return [...prev, id];
+    });
+    console.warn(`[Forgenite] Marking model "${id}" as failed: ${reason}`);
+  }, []);
+
   /* ---------------- streaming (chat mode) ---------------- */
 
   const streamAssistant = useCallback(
@@ -344,11 +385,18 @@ export default function Home() {
             res.status === 401
               ? "\n\nOpen **Settings** to paste an NVIDIA API key, or set `NVIDIA_API_KEY` on the server."
               : "";
+          const errText = j.error || `Request failed (${res.status}).`;
+          // Track models that return 403/404 so the picker can warn the user.
+          if (res.status === 403 || res.status === 404) {
+            markModelFailed(model, `HTTP ${res.status}: ${errText}`);
+          } else if (FAILED_ERR_RE.test(errText)) {
+            markModelFailed(model, errText);
+          }
           patchMessage(chatId, assistantId, (m) => ({
             ...m,
             pending: false,
             error: true,
-            content: `⚠️ ${j.error || `Request failed (${res.status}).`}${hint}`,
+            content: `⚠️ ${errText}${hint}`,
           }));
           return;
         }
@@ -388,7 +436,7 @@ export default function Home() {
         abortRef.current = null;
       }
     },
-    [chats, patchChat, patchMessage, settings]
+    [chats, patchChat, patchMessage, settings, markModelFailed]
   );
 
   /* ---------------- agent mode ---------------- */
@@ -579,7 +627,13 @@ export default function Home() {
       if (e && e.name === "AbortError") {
         patch((m) => ({ ...m, status: "stopped", phase: null }));
       } else {
-        patch((m) => ({ ...m, status: "error", phase: null, error: e.message || String(e) }));
+        const msg = e?.message || String(e);
+        // Detect "not available on your account" style errors thrown by callChat
+        // (lib/agent.js) so we can badge the model in the picker.
+        if (FAILED_ERR_RE.test(msg)) {
+          markModelFailed(model, msg);
+        }
+        patch((m) => ({ ...m, status: "error", phase: null, error: msg }));
       }
     }
   };
@@ -799,8 +853,10 @@ export default function Home() {
               models={models}
               source={modelSource}
               value={currentModel}
+              failed={failedModels}
               onChange={pickModel}
               onRefresh={() => fetchModels(settings.apiKey)}
+              onClearFailed={() => setFailedModels([])}
               loading={modelsLoading}
             />
             <button
