@@ -6,6 +6,12 @@ export const maxDuration = 60;
 
 const NIM_CHAT_URL = "https://integrate.api.nvidia.com/v1/chat/completions";
 
+const THINK_OPEN = "<think>\n";
+const THINK_CLOSE = "\n</think>\n";
+
+/** Reasoning models stream their chain of thought in a separate field; wrap it so the client can render it. */
+const wrapReasoning = (text) => `<think>\n${text}\n</think>\n`;
+
 const clamp = (v, min, max, fallback) => {
   const n = Number(v);
   if (!Number.isFinite(n)) return fallback;
@@ -137,9 +143,17 @@ export async function POST(req) {
   const contentType = upstream.headers.get("content-type") || "";
 
   // Non-streaming JSON reply (safety net): emit the full content at once.
+  // Reasoning models can return an empty `content` with the answer in
+  // `reasoning_content` — prepend it (wrapped) so the reply is never blank.
   if (contentType.includes("application/json")) {
     const j = await upstream.json().catch(() => null);
-    const text = j?.choices?.[0]?.message?.content ?? "";
+    const message = j?.choices?.[0]?.message || {};
+    const content = message.content ?? "";
+    const reasoning = message.reasoning_content ?? message.reasoning;
+    const text =
+      !content && typeof reasoning === "string" && reasoning.trim()
+        ? wrapReasoning(reasoning)
+        : content;
     return new Response(text, {
       headers: { "Content-Type": "text/plain; charset=utf-8" },
     });
@@ -153,6 +167,31 @@ export async function POST(req) {
     async start(controller) {
       const reader = upstream.body.getReader();
       let buffer = "";
+      let thinkOpen = false;
+
+      const emit = (text) => {
+        if (text) controller.enqueue(encoder.encode(text));
+      };
+
+      // Reasoning chunks arrive before the answer. Wrap the whole reasoning
+      // block in <think> … </think> so the client can collapse it.
+      const pushReasoning = (text) => {
+        if (!thinkOpen) {
+          thinkOpen = true;
+          emit(THINK_OPEN);
+        }
+        emit(text);
+      };
+
+      // Close the reasoning block as soon as real content shows up (or at the
+      // end of the stream) so the thought never swallows the answer.
+      const closeThink = () => {
+        if (thinkOpen) {
+          thinkOpen = false;
+          emit(THINK_CLOSE);
+        }
+      };
+
       try {
         while (true) {
           const { done, value } = await reader.read();
@@ -175,19 +214,29 @@ export async function POST(req) {
                 const em =
                   obj.error.message ||
                   (typeof obj.error === "string" ? obj.error : "Unknown upstream error");
-                controller.enqueue(encoder.encode(`\n\n⚠️ ${em}`));
+                closeThink();
+                emit(`\n\n⚠️ ${em}`);
                 continue;
               }
-              const content = obj.choices?.[0]?.delta?.content;
-              if (content) controller.enqueue(encoder.encode(content));
+
+              const delta = obj.choices?.[0]?.delta || {};
+              const reasoning = delta.reasoning_content ?? delta.reasoning;
+              if (typeof reasoning === "string" && reasoning) pushReasoning(reasoning);
+
+              if (delta.content) {
+                closeThink();
+                emit(delta.content);
+              }
             } catch {
               // partial JSON line — ignore, it will re-appear in the next chunk
             }
           }
         }
+        closeThink();
       } catch (e) {
         try {
-          controller.enqueue(encoder.encode(`\n\n⚠️ Stream interrupted: ${e.message}`));
+          closeThink();
+          emit(`\n\n⚠️ Stream interrupted: ${e.message}`);
         } catch {
           // controller already closed
         }

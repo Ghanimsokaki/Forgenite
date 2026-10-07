@@ -3,7 +3,15 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { shortName } from "@/lib/models";
 
-export default function ModelPicker({ models, source, value, onChange, onRefresh, loading }) {
+export default function ModelPicker({
+  models,
+  source,
+  value,
+  onChange,
+  onRefresh,
+  loading,
+  failed = [],
+}) {
   const [open, setOpen] = useState(false);
   const [q, setQ] = useState("");
   const ref = useRef(null);
@@ -96,11 +104,18 @@ export default function ModelPicker({ models, source, value, onChange, onRefresh
               >
                 <div className="mp-item-top">
                   <span className="mp-item-name">{m.name || shortName(m.id)}</span>
-                  {m.id === value && (
-                    <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
-                      <path d="M3 8.5l3.5 3.5L13 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-                    </svg>
-                  )}
+                  <span className="mp-marks">
+                    {failed.includes(m.id) && (
+                      <span className="mp-fail" title="This model is not enabled for your NVIDIA API key">
+                        ⚠ not on your key
+                      </span>
+                    )}
+                    {m.id === value && (
+                      <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
+                        <path d="M3 8.5l3.5 3.5L13 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                      </svg>
+                    )}
+                  </span>
                 </div>
                 <div className="mp-item-sub">
                   <span className="chip">{m.publisher}</span>

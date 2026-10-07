@@ -18,13 +18,24 @@ import { CURATED_MODELS, DEFAULT_MODEL, shortName } from "@/lib/models";
 
 const LS_CHATS = "forgenite.chats.v1";
 const LS_SETTINGS = "forgenite.settings.v1";
+const LS_FAILED = "forgenite.failed.v1";
+
+/** Upstream errors that mean "this model just isn't on your key/account". */
+const MODEL_UNAVAILABLE_RE =
+  /not found for account|not available on your account|authorization failed/i;
+
+/** Reasoning models can leak their chain of thought back into the history — drop completed blocks. */
+const stripThink = (s) => {
+  const t = String(s ?? "");
+  return t.replace(/<think>[\s\S]*?<\/think>/gi, "").trim() || t.trim();
+};
 
 const DEFAULT_SETTINGS = {
   apiKey: "",
   systemPrompt:
     "You are Forgenite, a helpful AI assistant served through NVIDIA NIM. Answer clearly and concisely, and use Markdown formatting (including code blocks) when it helps.",
   temperature: 0.7,
-  maxTokens: 1024,
+  maxTokens: 4096,
   model: DEFAULT_MODEL,
   mode: "chat",
   agentMaxSteps: 8,
@@ -76,11 +87,12 @@ function toChatMessages(msgs) {
       m.role === "agent"
         ? {
             role: "assistant",
-            content:
+            content: stripThink(
               m.final ||
-              `*(agent run: ${m.steps?.length || 0} steps, ${m.files?.length || 0} files created)*`,
+                `*(agent run: ${m.steps?.length || 0} steps, ${m.files?.length || 0} files created)*`
+            ),
           }
-        : { role: m.role, content: m.content }
+        : { role: m.role, content: stripThink(m.content) }
     );
 }
 
@@ -124,6 +136,8 @@ export default function Home() {
   const [modelSource, setModelSource] = useState("fallback");
   const [modelsLoading, setModelsLoading] = useState(false);
   const [hasServerKey, setHasServerKey] = useState(false);
+  // Models this key/account cannot call (HTTP 403/404) — persisted across reloads.
+  const [failedModels, setFailedModels] = useState([]);
 
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
@@ -169,6 +183,13 @@ export default function Home() {
     } catch {
       /* defaults */
     }
+    try {
+      const rawF = localStorage.getItem(LS_FAILED);
+      const parsedF = rawF ? JSON.parse(rawF) : [];
+      if (Array.isArray(parsedF)) setFailedModels(parsedF.filter((x) => typeof x === "string"));
+    } catch {
+      /* no failed models yet */
+    }
     setReady(true);
   }, []);
 
@@ -206,6 +227,21 @@ export default function Home() {
   useEffect(() => {
     if (ready) localStorage.setItem(LS_SETTINGS, JSON.stringify(settings));
   }, [settings, ready]);
+
+  useEffect(() => {
+    if (!ready) return;
+    try {
+      localStorage.setItem(LS_FAILED, JSON.stringify(failedModels));
+    } catch {
+      /* keep in memory only */
+    }
+  }, [failedModels, ready]);
+
+  /** Remember that this model is not callable with the current key/account. */
+  const markFailed = useCallback((modelId) => {
+    if (!modelId) return;
+    setFailedModels((prev) => (prev.includes(modelId) ? prev : [...prev, modelId]));
+  }, []);
 
   /* ---------------- models ---------------- */
 
@@ -339,11 +375,14 @@ export default function Home() {
         });
 
         if (!res.ok) {
+          if (res.status === 403 || res.status === 404) markFailed(model);
           const j = await res.json().catch(() => ({}));
           const hint =
             res.status === 401
               ? "\n\nOpen **Settings** to paste an NVIDIA API key, or set `NVIDIA_API_KEY` on the server."
-              : "";
+              : res.status === 403 || res.status === 404
+                ? `\n\nThis model is not enabled for your key — it is now flagged in the model picker (⚠ not on your key). Try another model.`
+                : "";
           patchMessage(chatId, assistantId, (m) => ({
             ...m,
             pending: false,
@@ -388,7 +427,7 @@ export default function Home() {
         abortRef.current = null;
       }
     },
-    [chats, patchChat, patchMessage, settings]
+    [chats, markFailed, patchChat, patchMessage, settings]
   );
 
   /* ---------------- agent mode ---------------- */
@@ -579,7 +618,9 @@ export default function Home() {
       if (e && e.name === "AbortError") {
         patch((m) => ({ ...m, status: "stopped", phase: null }));
       } else {
-        patch((m) => ({ ...m, status: "error", phase: null, error: e.message || String(e) }));
+        const msg = e.message || String(e);
+        if (MODEL_UNAVAILABLE_RE.test(msg)) markFailed(model);
+        patch((m) => ({ ...m, status: "error", phase: null, error: msg }));
       }
     }
   };
@@ -802,6 +843,7 @@ export default function Home() {
               onChange={pickModel}
               onRefresh={() => fetchModels(settings.apiKey)}
               loading={modelsLoading}
+              failed={failedModels}
             />
             <button
               type="button"
