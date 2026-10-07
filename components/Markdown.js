@@ -4,10 +4,58 @@ import { useMemo, useState } from "react";
 
 /* ------------------------------------------------------------------ */
 /*  Tiny markdown renderer (no dependencies):                          */
-/*  fenced code blocks, inline code, bold, italic, links, autolinks,   */
-/*  unordered/ordered lists, headings, blockquotes.                    */
-/*  Handles unterminated ``` fences gracefully while streaming.        */
+/*  <think> blocks (collapsible), fenced code blocks, inline code,     */
+/*  bold, italic, links, autolinks, unordered/ordered lists, headings, */
+/*  blockquotes. Handles unterminated fences/think-blocks while        */
+/*  streaming.                                                         */
 /* ------------------------------------------------------------------ */
+
+/**
+ * Split text into top-level segments of type "think" or "text".
+ * Handles both closed <think>…</think> blocks and an unterminated
+ * <think> (common while streaming a reasoning model). The split runs
+ * BEFORE code-fence parsing so a ``` inside a thought stays literal.
+ */
+function splitThink(text) {
+  const out = [];
+  let i = 0;
+  const n = text.length;
+  let buf = "";
+
+  while (i < n) {
+    const open = text.indexOf("<think>", i);
+    if (open === -1) {
+      buf += text.slice(i);
+      break;
+    }
+    buf += text.slice(i, open);
+    if (buf) {
+      out.push({ type: "text", text: buf });
+      buf = "";
+    }
+    const innerStart = open + 7; // length of "<think>"
+    const close = text.indexOf("</think>", innerStart);
+    if (close === -1) {
+      // Streaming: unterminated think block — treat the rest as a thought.
+      out.push({
+        type: "think",
+        thought: text.slice(innerStart),
+        open: true,
+      });
+      return out;
+    }
+    out.push({
+      type: "think",
+      thought: text.slice(innerStart, close),
+      open: false,
+    });
+    i = close + 8; // length of "</think>"
+    if (text[i] === "\n") i += 1;
+  }
+
+  if (buf) out.push({ type: "text", text: buf });
+  return out;
+}
 
 function splitFences(text) {
   const out = [];
@@ -60,7 +108,7 @@ function splitFences(text) {
 }
 
 const INLINE_RE =
-  /(`[^`\n]+`)|(\*\*[^*\n]+\*\*)|(\*[^*\n]+\*)|(\[[^\]\n]+\]\([^)\s]+\))|(https?:\/\/[^\s<>)]+)/g;
+  /(`[^`\n]+`)|(\*\*[^*\n]+\*\*)|(\*[^*\n]+\*)|(\[[^\]\n]+\]\([^)\s]+\))|(https?:\/\/[^\\s<>)]+)/g;
 
 function inline(text, kp) {
   if (!text) return null;
@@ -208,17 +256,46 @@ function CodeBlock({ lang, code }) {
   );
 }
 
+function ThinkBlock({ thought, open: streamingOpen }) {
+  // While streaming keep the block open so the user can watch reasoning
+  // arrive live; once the thought is complete default to collapsed.
+  const [forceOpen, setForceOpen] = useState(false);
+  const isOpen = streamingOpen || forceOpen;
+
+  const trimmed = (thought || "").replace(/^\s+|\s+$/g, "");
+
+  return (
+    <details
+      className="thinkblock"
+      open={isOpen}
+      onToggle={(e) => {
+        // Once the user manually opens it, keep it open even after streaming ends.
+        if (e.currentTarget.open && !streamingOpen) setForceOpen(true);
+      }}
+    >
+      <summary>🧠 Thinking… (click to expand)</summary>
+      <pre>{trimmed || (streamingOpen ? "…" : "")}</pre>
+    </details>
+  );
+}
+
 export default function Markdown({ text }) {
-  const blocks = useMemo(() => splitFences(text || ""), [text]);
+  const segments = useMemo(() => splitThink(text || ""), [text]);
   return (
     <div className="md">
-      {blocks.map((b, i) =>
-        b.type === "code" ? (
-          <CodeBlock key={i} lang={b.lang} code={b.code} />
-        ) : (
-          <TextBlock key={i} text={b.text} kp={i} />
-        )
-      )}
+      {segments.map((seg, si) => {
+        if (seg.type === "think") {
+          return <ThinkBlock key={`t${si}`} thought={seg.thought} open={seg.open} />;
+        }
+        const blocks = splitFences(seg.text);
+        return blocks.map((b, i) =>
+          b.type === "code" ? (
+            <CodeBlock key={`${si}-c${i}`} lang={b.lang} code={b.code} />
+          ) : (
+            <TextBlock key={`${si}-x${i}`} text={b.text} kp={`${si}-${i}`} />
+          )
+        );
+      })}
     </div>
   );
 }
