@@ -1,8 +1,8 @@
 {
   "name": "forgenite",
-  "version": "1.0.0",
+  "version": "2.0.0",
   "private": true,
-  "description": "Chat with 20+ frontier AI models — powered by NVIDIA NIM, deployed on Vercel.",
+  "description": "AI workspace with 20+ frontier models, built-in web builder, GitHub integration, MCP connectivity, and autonomous agent capabilities — powered by NVIDIA NIM.",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
@@ -12,7 +12,10 @@
   "dependencies": {
     "next": "^14.2.5",
     "react": "^18.3.1",
-    "react-dom": "^18.3.1"
+    "react-dom": "^18.3.1",
+    "@monaco-editor/react": "^4.6.0",
+    "jszip": "^3.10.1",
+    "framer-motion": "^11.0.28"
   },
   "engines": {
     "node": ">=18.17"
