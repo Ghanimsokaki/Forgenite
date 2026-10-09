@@ -1,0 +1,9 @@
+services:
+  forgenite:
+    build: .
+    restart: unless-stopped
+    ports: ["3000:3000"]
+    env_file: .env
+    volumes: ["forgenite-data:/data"]
+volumes:
+  forgenite-data:

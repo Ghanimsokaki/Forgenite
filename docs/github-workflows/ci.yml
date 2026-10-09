@@ -1,0 +1,35 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  build-test:
+    name: Build, unit + e2e tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run build
+      - run: npm run test:e2e
+
+  key-check:
+    name: Verify NVIDIA NIM key
+    # Add NVIDIA_API_KEY under repo Settings -> Secrets and variables -> Actions. Skips if unset.
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - name: Check key against the NVIDIA NIM API
+        env:
+          NVIDIA_API_KEY: ${{ secrets.NVIDIA_API_KEY }}
+        run: |
+          if [ -z "$NVIDIA_API_KEY" ]; then echo "ℹ️ NVIDIA_API_KEY secret not set — skipping."; exit 0; fi
+          curl -sS -f -H "Authorization: Bearer $NVIDIA_API_KEY" https://integrate.api.nvidia.com/v1/models -o /dev/null \
+            && echo "✅ NVIDIA_API_KEY is valid." || { echo "❌ Key check failed."; exit 1; }

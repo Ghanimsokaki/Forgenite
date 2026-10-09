@@ -111,6 +111,8 @@ export default function SettingsModal({ open, settings, hasServerKey, onSave, on
                 <option value={1024}>1024</option>
                 <option value={2048}>2048</option>
                 <option value={4096}>4096</option>
+                <option value={8192}>8192</option>
+                <option value={16384}>16384</option>
               </select>
               <p className="hint-line">Upper limit on the length of each reply.</p>
             </div>
@@ -124,7 +126,7 @@ export default function SettingsModal({ open, settings, hasServerKey, onSave, on
               id="st-steps"
               type="range"
               min="2"
-              max="16"
+              max="30"
               step="1"
               value={local.agentMaxSteps}
               onChange={(e) => set({ agentMaxSteps: Number(e.target.value) })}

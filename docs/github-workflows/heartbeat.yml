@@ -1,0 +1,20 @@
+name: Automation heartbeat
+
+# Optional free 24/7 trigger for hosts that sleep or are serverless.
+# Set repo secrets FORGENITE_URL (e.g. https://my-forgenite.vercel.app) and CRON_SECRET.
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger due automations
+        env:
+          URL: ${{ secrets.FORGENITE_URL }}
+          SECRET: ${{ secrets.CRON_SECRET }}
+        run: |
+          if [ -z "$URL" ] || [ -z "$SECRET" ]; then echo "FORGENITE_URL / CRON_SECRET not set — skipping."; exit 0; fi
+          curl -sS -m 280 -H "Authorization: Bearer $SECRET" "$URL/api/cron"

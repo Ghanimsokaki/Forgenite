@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useState } from "react";
+import { safeHref } from "@/lib/safeUrl";
 
 /* ------------------------------------------------------------------ */
 /*  Tiny markdown renderer (no dependencies):                          */
@@ -131,12 +132,15 @@ function inline(text, kp) {
       out.push(<strong key={key}>{tok.slice(2, -2)}</strong>);
     } else if (tok.startsWith("[")) {
       const mm = /^\[([^\]]+)\]\(([^)\s]+)\)$/.exec(tok);
-      if (mm) {
+      const href = mm && safeHref(mm[2]);
+      if (mm && href) {
         out.push(
-          <a key={key} href={mm[2]} target="_blank" rel="noreferrer noopener">
+          <a key={key} href={href} target="_blank" rel="noreferrer noopener">
             {mm[1]}
           </a>
         );
+      } else if (mm) {
+        out.push(mm[1]);
       } else {
         out.push(tok);
       }
