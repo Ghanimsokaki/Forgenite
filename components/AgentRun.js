@@ -9,6 +9,11 @@ const TOOL_META = {
   run_javascript: { icon: "⚡", cls: "t-js" },
   write_file: { icon: "📄", cls: "t-file" },
   append_file: { icon: "📝", cls: "t-file" },
+  read_file: { icon: "👁️", cls: "t-file" },
+  list_files: { icon: "🗂️", cls: "t-file" },
+  delete_file: { icon: "🗑️", cls: "t-file" },
+  mcp_call: { icon: "🔌", cls: "t-url" },
+  notify: { icon: "🔔", cls: "t-search" },
 };
 
 const STATUS_LABEL = {
@@ -33,6 +38,9 @@ function inputSummary(tool, input) {
   if (tool === "write_file" || tool === "append_file") {
     return `${String(i.path ?? "file")} · ${fmtChars(String(i.content ?? "").length)}`;
   }
+  if (tool === "read_file" || tool === "delete_file") return String(i.path ?? "");
+  if (tool === "list_files") return "all files";
+  if (tool === "mcp_call") return `${i.server ?? "?"} → ${i.tool ?? "?"}`;
   return JSON.stringify(i).slice(0, 120);
 }
 
@@ -43,12 +51,14 @@ function fullInput(tool, input) {
   return JSON.stringify(i, null, 2);
 }
 
-export default function AgentRun({ run, onOpenFile, onRetry, streaming }) {
+export default function AgentRun({ run, onOpenFile, onOpenBuilder, onRetry, streaming, compact }) {
   const steps = run.steps || [];
   const files = run.files || [];
 
+  const hasHtml = files.some((f) => /\.html?$/i.test(f.path));
+
   return (
-    <div className="msg msg-assistant">
+    <div className={"msg msg-assistant" + (compact ? " compact" : "")}>
       <div className="avatar av-bot">
         <svg width="16" height="16" viewBox="0 0 16 16" fill="none" aria-hidden="true">
           <rect x="1.8" y="4.2" width="12.4" height="9" rx="2.6" stroke="currentColor" strokeWidth="1.4" />
@@ -142,7 +152,14 @@ export default function AgentRun({ run, onOpenFile, onRetry, streaming }) {
 
           {files.length > 0 && (
             <div className="afiles">
-              <div className="afiles-label">📦 Files created — click to view, copy, download or preview</div>
+              <div className="afiles-label">
+                📦 Files created — click to view, copy, download or preview
+                {onOpenBuilder && hasHtml && (
+                  <button type="button" className="primary-btn btn-sm afiles-open" onClick={() => onOpenBuilder(files)}>
+                    🛠️ Open in Web Builder
+                  </button>
+                )}
+              </div>
               <div className="afiles-row">
                 {files.map((f) => (
                   <button
@@ -152,7 +169,7 @@ export default function AgentRun({ run, onOpenFile, onRetry, streaming }) {
                     onClick={() => onOpenFile(f)}
                   >
                     <span className="fc-name">📄 {f.path}</span>
-                    <span className="fsize">{fmtChars(f.content.length)}</span>
+                    <span className="fsize">{fmtChars((f.content || "").length)}</span>
                   </button>
                 ))}
               </div>

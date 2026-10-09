@@ -2,6 +2,7 @@
 
 import { useState } from "react";
 import { downloadFile, downloadAsZip, copyToClipboard } from "@/lib/fileUtils";
+import { buildPreviewHtml } from "@/lib/preview";
 
 export default function FileViewer({ file, files = [], onClose, onOpenWorkspace }) {
   const [copied, setCopied] = useState(false);
@@ -28,11 +29,18 @@ export default function FileViewer({ file, files = [], onClose, onOpenWorkspace 
     }
   };
 
+  // Sandboxed preview: the generated HTML runs inside an opaque-origin iframe,
+  // so it can never read Forgenite's localStorage (API keys) or cookies.
   const preview = () => {
-    const blob = new Blob([file.content], { type: "text/html;charset=utf-8" });
-    const url = URL.createObjectURL(blob);
-    window.open(url, "_blank");
-    setTimeout(() => URL.revokeObjectURL(url), 60000);
+    const html = buildPreviewHtml(files.length ? files : [file], file.path);
+    const w = window.open("", "_blank");
+    if (!w) return;
+    w.opener = null;
+    w.document.write(
+      '<!doctype html><title>Preview</title><style>html,body,iframe{margin:0;border:0;width:100%;height:100%}</style><iframe sandbox="allow-scripts allow-forms allow-modals allow-popups"></iframe>'
+    );
+    w.document.querySelector("iframe").srcdoc = html;
+    w.document.close();
   };
 
   const isHtml = /\.html?$/i.test(file.path);
@@ -56,9 +64,9 @@ export default function FileViewer({ file, files = [], onClose, onOpenWorkspace 
         <pre className="fv-pre">{file.content}</pre>
 
         <div className="modal-foot">
-          {multipleFiles && onOpenWorkspace && (
+          {onOpenWorkspace && files.some((f) => /\.html?$/i.test(f.path)) && (
             <button type="button" className="primary-btn" onClick={onOpenWorkspace}>
-              🛠️ Open in Workspace
+              🛠️ Open in Web Builder
             </button>
           )}
           {isHtml && (

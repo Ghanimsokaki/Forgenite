@@ -1,20 +1,20 @@
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import dynamic from "next/dynamic";
 import AgentRun from "@/components/AgentRun";
 import FileViewer from "@/components/FileViewer";
 import Markdown from "@/components/Markdown";
 import ModelPicker from "@/components/ModelPicker";
 import SettingsModal from "@/components/Settings";
-import {
-  AGENT_PROMPT,
-  AGENT_TOOLS,
-  callChat,
-  executeTool,
-  extractJson,
-  sanitizePath,
-} from "@/lib/agent";
+import GitHubConnectionModal from "@/components/GitHubConnectionModal";
+import MCPConnectionModal from "@/components/MCPConnectionModal";
+import { BASE_TOOLS, buildAgentPrompt, callChat, executeTool, runAgentLoop } from "@/lib/agent";
+import { getSavedServers } from "@/lib/mcp";
 import { CURATED_MODELS, DEFAULT_MODEL, shortName } from "@/lib/models";
+
+const WebBuilder = dynamic(() => import("@/components/WebBuilder"), { ssr: false, loading: () => <div className="wb-empty">Loading builder…</div> });
+const Automations = dynamic(() => import("@/components/Automations"), { ssr: false });
 
 const LS_CHATS = "forgenite.chats.v1";
 const LS_SETTINGS = "forgenite.settings.v1";
@@ -29,6 +29,7 @@ const DEFAULT_SETTINGS = {
   model: DEFAULT_MODEL,
   mode: "chat",
   agentMaxSteps: 8,
+  view: "chat",
 };
 
 const FAILED_ERR_RE = /not found for account|not available on your account|authorization failed/i;
@@ -144,6 +145,9 @@ export default function Home() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [copiedId, setCopiedId] = useState(null);
   const [viewFile, setViewFile] = useState(null);
+  const [githubOpen, setGithubOpen] = useState(false);
+  const [mcpOpen, setMcpOpen] = useState(false);
+  const [importReq, setImportReq] = useState(null);
 
   const abortRef = useRef(null);
   const scrollRef = useRef(null);
@@ -151,6 +155,16 @@ export default function Home() {
   const stickToBottom = useRef(true);
 
   const mode = settings.mode === "agent" ? "agent" : "chat";
+  const view = ["chat", "builder", "automations"].includes(settings.view) ? settings.view : "chat";
+  const setView = (v) => {
+    setSettings((s) => ({ ...s, view: v }));
+    setSidebarOpen(false);
+  };
+  const openInBuilder = useCallback((files, name) => {
+    setImportReq({ files, name });
+    setViewFile(null);
+    setSettings((s) => ({ ...s, view: "builder" }));
+  }, []);
 
   const activeChat = useMemo(
     () => chats.find((c) => c.id === activeId) || null,
@@ -443,199 +457,27 @@ export default function Home() {
 
   const agentLoop = async (chatId, runId, task, signal, context, model) => {
     const patch = (fn) => patchMessage(chatId, runId, fn);
-    const maxSteps = Math.min(Math.max(Number(settings.agentMaxSteps) || 8, 2), 16);
-
-    const loopMsgs = [
-      { role: "system", content: AGENT_PROMPT },
-      {
-        role: "user",
-        content: context
-          ? `TASK:\n${task}\n\nRecent conversation for context (the task may relate to it):\n${context}`
-          : `TASK:\n${task}`,
+    const mcpServers = getSavedServers();
+    const tools = mcpServers.length ? [...BASE_TOOLS, "mcp_call"] : BASE_TOOLS;
+    const res = await runAgentLoop({
+      task,
+      context: context ? `Recent conversation for context (the task may relate to it):\n${context}` : "",
+      tools,
+      maxSteps: Math.min(Math.max(Number(settings.agentMaxSteps) || 8, 2), 30),
+      signal,
+      systemPrompt: buildAgentPrompt({ tools, mcpServers }),
+      callModel: (messages) =>
+        callChat({ messages, model, temperature: Math.min(settings.temperature, 0.4), maxTokens: 8192, apiKey: settings.apiKey, signal }),
+      executeTool: (tool, input, sig) => executeTool(tool, input, sig, { mcpServers }),
+      onEvent: (ev) => {
+        if (ev.type === "phase") patch((m) => ({ ...m, phase: ev.phase }));
+        else if (ev.type === "step") patch((m) => ({ ...m, steps: [...(m.steps || []), ev.step] }));
+        else if (ev.type === "step-update") patch((m) => ({ ...m, steps: (m.steps || []).map((s, i) => (i === ev.index ? ev.step : s)) }));
+        else if (ev.type === "files") patch((m) => ({ ...m, files: ev.files }));
       },
-    ];
-
-    let stepsUsed = 0;
-    let parseFails = 0;
-    let final = "";
-    let stepIdx = -1;
-    const fileMap = {}; // local mirror of files for appends
-
-    const pushStep = (step) => {
-      stepIdx += 1;
-      patch((m) => ({ ...m, steps: [...(m.steps || []), step] }));
-      return stepIdx;
-    };
-    const patchStep = (idx, fn) =>
-      patch((m) => ({ ...m, steps: (m.steps || []).map((s, i) => (i === idx ? fn(s) : s)) }));
-
-    try {
-      while (stepsUsed < maxSteps) {
-        patch((m) => ({ ...m, phase: "thinking" }));
-
-        const raw = await callChat({
-          messages: loopMsgs,
-          model,
-          temperature: Math.min(settings.temperature, 0.4),
-          maxTokens: 4096,
-          apiKey: settings.apiKey,
-          signal,
-        });
-
-        const parsed = extractJson(raw);
-
-        if (!parsed || (!parsed.action && parsed.final === undefined)) {
-          parseFails++;
-          if (parseFails >= 2) {
-            const prose = raw && raw.trim() && !raw.trim().startsWith("{") ? raw.trim() : "";
-            if (prose) {
-              final = prose;
-              break;
-            }
-            throw new Error(
-              "The model could not follow the agent protocol (invalid JSON twice in a row). Try a stronger model, e.g. Llama 3.3 70B or Llama 3.1 405B."
-            );
-          }
-          loopMsgs.push(
-            { role: "assistant", content: String(raw).slice(0, 1500) },
-            {
-              role: "user",
-              content:
-                'That was not a single valid JSON object. Reply again with EXACTLY one JSON object: {"thought":"...","action":{"tool":"...","input":{...}}} or {"thought":"...","final":"..."}. No other text.',
-            }
-          );
-          continue;
-        }
-        parseFails = 0;
-
-        // Terminal reply?
-        if (parsed.final !== undefined || parsed.action?.tool === "finish") {
-          final =
-            typeof parsed.final === "string" && parsed.final.trim()
-              ? parsed.final
-              : parsed.action?.input?.summary || "Task complete.";
-          break;
-        }
-
-        const tool = parsed.action?.tool;
-        const input = parsed.action?.input || {};
-        const thought = typeof parsed.thought === "string" ? parsed.thought.slice(0, 500) : "";
-
-        loopMsgs.push({ role: "assistant", content: JSON.stringify(parsed) });
-
-        if (!AGENT_TOOLS.includes(tool)) {
-          pushStep({
-            thought,
-            tool: tool || "unknown",
-            input,
-            observation: `Unknown tool. Available tools: ${AGENT_TOOLS.join(", ")}.`,
-            ok: false,
-            ms: 0,
-          });
-          loopMsgs.push({
-            role: "user",
-            content: `OBSERVATION:\nError: unknown tool "${tool}".`,
-          });
-          stepsUsed++;
-          continue;
-        }
-
-        const idx = pushStep({ thought, tool, input, observation: null, ok: null, ms: 0 });
-        patch((m) => ({ ...m, phase: "acting" }));
-
-        const t0 = Date.now();
-        let observation;
-        let ok = true;
-
-        try {
-          if (tool === "write_file") {
-            const path = sanitizePath(input.path);
-            const content = String(input.content ?? "");
-            fileMap[path] = content;
-            patch((m) => ({
-              ...m,
-              files: [...(m.files || []).filter((f) => f.path !== path), { path, content }],
-            }));
-            observation = `File "${path}" created (${content.length} characters).`;
-          } else if (tool === "append_file") {
-            const path = sanitizePath(input.path);
-            const content = String(input.content ?? "");
-            if (fileMap[path] === undefined) {
-              ok = false;
-              observation = `Error: file "${path}" does not exist yet. Use write_file first.`;
-            } else {
-              fileMap[path] += content;
-              patch((m) => ({
-                ...m,
-                files: (m.files || []).map((f) =>
-                  f.path === path ? { ...f, content: fileMap[path] } : f
-                ),
-              }));
-              observation = `Appended ${content.length} characters to "${path}" (now ${fileMap[path].length} total).`;
-            }
-          } else {
-            const r = await executeTool(tool, input, signal);
-            ok = r.ok;
-            observation = r.ok ? r.result : `TOOL ERROR: ${r.error}`;
-          }
-        } catch (e) {
-          if (e && e.name === "AbortError") throw e;
-          ok = false;
-          observation = `TOOL ERROR: ${e.message || e}`;
-        }
-
-        const ms = Date.now() - t0;
-        patchStep(idx, (s) => ({
-          ...s,
-          observation: String(observation).slice(0, 8000),
-          ok,
-          ms,
-        }));
-        patch((m) => ({ ...m, phase: "thinking" }));
-
-        loopMsgs.push({
-          role: "user",
-          content: `OBSERVATION:\n${String(observation).slice(0, 5000)}`,
-        });
-        stepsUsed++;
-      }
-
-      // Step budget exhausted — force a final summary.
-      if (!final) {
-        loopMsgs.push({
-          role: "user",
-          content:
-            'You have reached the maximum number of steps. Reply now with your final JSON {"thought":"...","final":"..."} — summarize what was accomplished and list any files you created. Do not call any more tools.',
-        });
-        patch((m) => ({ ...m, phase: "thinking" }));
-        const raw = await callChat({
-          messages: loopMsgs,
-          model,
-          temperature: Math.min(settings.temperature, 0.4),
-          maxTokens: 2048,
-          apiKey: settings.apiKey,
-          signal,
-        });
-        const parsed = extractJson(raw);
-        final =
-          (parsed && typeof parsed.final === "string" && parsed.final.trim()) ||
-          "The agent used all its steps. Partial results and files are kept above — you can retry the task or continue in Chat mode.";
-      }
-
-      patch((m) => ({ ...m, status: "done", phase: null, final }));
-    } catch (e) {
-      if (e && e.name === "AbortError") {
-        patch((m) => ({ ...m, status: "stopped", phase: null }));
-      } else {
-        const msg = e?.message || String(e);
-        // Detect "not available on your account" style errors thrown by callChat
-        // (lib/agent.js) so we can badge the model in the picker.
-        if (FAILED_ERR_RE.test(msg)) {
-          markModelFailed(model, msg);
-        }
-        patch((m) => ({ ...m, status: "error", phase: null, error: msg }));
-      }
-    }
+    });
+    if (res.status === "error" && FAILED_ERR_RE.test(res.error)) markModelFailed(model, res.error);
+    patch((m) => ({ ...m, status: res.status, phase: null, final: res.final, error: res.error, files: res.files }));
   };
 
   const sendAgent = async (task) => {
@@ -776,7 +618,19 @@ export default function Home() {
           </div>
         </div>
 
-        <button type="button" className="side-new" onClick={createChat}>
+        <nav className="side-nav" aria-label="Sections">
+          <button type="button" className={"side-nav-btn" + (view === "chat" ? " on" : "")} onClick={() => setView("chat")}>
+            💬 <span>Chat & Agent</span>
+          </button>
+          <button type="button" className={"side-nav-btn" + (view === "builder" ? " on" : "")} onClick={() => setView("builder")}>
+            🛠️ <span>Web Builder</span>
+          </button>
+          <button type="button" className={"side-nav-btn" + (view === "automations" ? " on" : "")} onClick={() => setView("automations")}>
+            ⏰ <span>Automations</span> <span className="nav-badge">24/7</span>
+          </button>
+        </nav>
+
+        <button type="button" className="side-new" onClick={() => { createChat(); setView("chat"); }}>
           <svg width="14" height="14" viewBox="0 0 16 16" fill="none">
             <path d="M8 3v10M3 8h10" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
           </svg>
@@ -791,7 +645,7 @@ export default function Home() {
               className={"chat-item" + (c.id === activeId ? " active" : "")}
               onClick={() => {
                 setActiveId(c.id);
-                setSidebarOpen(false);
+                setView("chat");
               }}
             >
               <span className="chat-item-title">{c.title}</span>
@@ -810,6 +664,11 @@ export default function Home() {
               </button>
             </div>
           ))}
+        </div>
+
+        <div className="side-connect">
+          <button type="button" className="side-link-btn" onClick={() => setGithubOpen(true)}>🐙 GitHub connection</button>
+          <button type="button" className="side-link-btn" onClick={() => setMcpOpen(true)}>🔌 MCP servers</button>
         </div>
 
         <div className="side-foot">
@@ -845,7 +704,7 @@ export default function Home() {
                 <path d="M37 5 L13 37 h13 L25 59 L51 25 H36 Z" fill="currentColor" />
               </svg>
             </span>
-            Forgenite
+            {view === "builder" ? "Web Builder" : view === "automations" ? "Automations" : "Forgenite"}
           </div>
 
           <div className="tb-actions">
@@ -891,6 +750,25 @@ export default function Home() {
           </div>
         </header>
 
+        {view === "builder" && (
+          <div className="view-full">
+            <WebBuilder
+              settings={settings}
+              model={currentModel}
+              importRequest={importReq}
+              onImportHandled={() => setImportReq(null)}
+              onNeedGitHub={() => setGithubOpen(true)}
+              onMarkFailed={markModelFailed}
+            />
+          </div>
+        )}
+        {view === "automations" && (
+          <div className="view-full scroll">
+            <Automations model={currentModel} settings={settings} />
+          </div>
+        )}
+        {view === "chat" && (
+          <>
         <div className="chat-scroll" ref={scrollRef} onScroll={onScroll}>
           {!activeChat || activeChat.messages.length === 0 ? (
             <div className="empty">
@@ -918,7 +796,8 @@ export default function Home() {
                   <p className="empty-sub">
                     One interface, every model — GLM-5.3, Kimi K3, DeepSeek V4, Nemotron 3,
                     GPT-OSS, Llama, Qwen3, MiniMax and more, streamed live through the NVIDIA NIM
-                    API. Add a key to unlock the full live list.
+                    API. Switch to <b>Agent</b> to let it act, open the <b>Web Builder</b> to make
+                    sites, or schedule <b>Automations</b> that run 24/7.
                   </p>
                 </>
               )}
@@ -940,7 +819,8 @@ export default function Home() {
                     key={m.id}
                     run={m}
                     streaming={streaming}
-                    onOpenFile={(f) => setViewFile(f)}
+                    onOpenFile={(f) => setViewFile({ file: f, files: m.files || [], name: titleFrom(m.task || "Agent project") })}
+                    onOpenBuilder={(files) => openInBuilder(files, titleFrom(m.task || "Agent project"))}
                     onRetry={retryAgent}
                   />
                 ) : (
@@ -1107,6 +987,8 @@ export default function Home() {
             )}
           </div>
         </div>
+          </>
+        )}
       </main>
 
       <SettingsModal
@@ -1121,7 +1003,14 @@ export default function Home() {
         }}
       />
 
-      <FileViewer file={viewFile} onClose={() => setViewFile(null)} />
+      <FileViewer
+        file={viewFile?.file}
+        files={viewFile?.files || []}
+        onClose={() => setViewFile(null)}
+        onOpenWorkspace={() => openInBuilder(viewFile.files, viewFile.name)}
+      />
+      <GitHubConnectionModal isOpen={githubOpen} onClose={() => setGithubOpen(false)} />
+      <MCPConnectionModal isOpen={mcpOpen} onClose={() => setMcpOpen(false)} />
     </div>
   );
 }

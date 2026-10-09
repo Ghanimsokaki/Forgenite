@@ -1,21 +1,25 @@
 {
   "name": "forgenite",
-  "version": "2.0.0",
+  "version": "3.0.0",
   "private": true,
-  "description": "AI workspace with 20+ frontier models, built-in web builder, GitHub integration, MCP connectivity, and autonomous agent capabilities — powered by NVIDIA NIM.",
+  "description": "AI workspace on NVIDIA NIM: streaming chat with 90+ models, autonomous agent, full Web Builder with live preview & one-click publishing, and 24/7 scheduled automations.",
   "scripts": {
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "next lint"
+    "lint": "next lint",
+    "test": "node --test tests/unit.test.mjs",
+    "test:e2e": "node tests/e2e.mjs",
+    "mock:nim": "node tests/mock-nim.mjs",
+    "start:24-7": "pm2 start ecosystem.config.cjs && pm2 save"
   },
   "dependencies": {
-    "next": "^14.2.5",
-    "react": "^18.3.1",
-    "react-dom": "^18.3.1",
     "@monaco-editor/react": "^4.6.0",
     "jszip": "^3.10.1",
-    "framer-motion": "^11.0.28"
+    "next": "^14.2.5",
+    "quickjs-emscripten": "^0.32.0",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1"
   },
   "engines": {
     "node": ">=18.17"

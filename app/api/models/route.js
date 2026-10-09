@@ -1,52 +1,38 @@
 import { NextResponse } from "next/server";
 import { CURATED_MODELS, publisherOf, shortName } from "@/lib/models";
+import { NIM_BASE, resolveKey, serverKey } from "@/lib/server/nim";
+import { guard } from "@/lib/server/guard";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
 
-const NIM_MODELS_URL = "https://integrate.api.nvidia.com/v1/models";
+const cache = globalThis.__forgeniteModelCache || (globalThis.__forgeniteModelCache = new Map());
 
-/**
- * GET /api/models
- * Returns the catalogue of chat models. With a key (browser header or server
- * env) it returns the LIVE list from NVIDIA NIM; otherwise it falls back to a
- * curated preset list. Also reports whether the server has NVIDIA_API_KEY set.
- */
 export async function GET(req) {
-  const hasServerKey = Boolean((process.env.NVIDIA_API_KEY || "").trim());
-  const key =
-    (req.headers.get("x-nvidia-api-key") || "").trim() ||
-    (process.env.NVIDIA_API_KEY || "").trim();
-
+  const blocked = guard(req, { name: "models", limit: 30 });
+  if (blocked) return blocked;
+  const hasServerKey = Boolean(serverKey());
+  const key = resolveKey(req);
   if (key) {
+    const hit = cache.get(key);
+    if (hit && Date.now() - hit.at < 10 * 60_000) return NextResponse.json({ source: "live", hasServerKey, models: hit.models });
     try {
-      const r = await fetch(NIM_MODELS_URL, {
-        headers: { Authorization: `Bearer ${key}` },
-        cache: "no-store",
-      });
+      const r = await fetch(`${NIM_BASE}/models`, { headers: { Authorization: `Bearer ${key}` }, cache: "no-store", signal: AbortSignal.timeout(10000) });
       if (r.ok) {
         const j = await r.json();
+        const curated = new Map(CURATED_MODELS.map((m) => [m.id, m]));
         const models = (Array.isArray(j.data) ? j.data : [])
-          .map((m) => ({
-            id: m.id,
-            name: shortName(m.id),
-            publisher: publisherOf(m.id),
-          }))
-          .filter((m) => m.id)
+          .filter((m) => m.id && !/embed|rerank|guard|reward|parse|clip|vision-only|tts|asr|nv-ingest/i.test(m.id))
+          .map((m) => ({ id: m.id, name: curated.get(m.id)?.name || shortName(m.id), publisher: publisherOf(m.id), description: curated.get(m.id)?.description }))
           .sort((a, b) => a.id.localeCompare(b.id));
-
         if (models.length) {
+          cache.set(key, { at: Date.now(), models });
           return NextResponse.json({ source: "live", hasServerKey, models });
         }
       }
     } catch {
-      // fall through to preset list
+      /* fall back */
     }
   }
-
-  return NextResponse.json({
-    source: "fallback",
-    hasServerKey,
-    models: CURATED_MODELS,
-  });
+  return NextResponse.json({ source: "fallback", hasServerKey, models: CURATED_MODELS });
 }
